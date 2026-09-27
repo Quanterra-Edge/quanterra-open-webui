@@ -20,8 +20,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import HTTPException
-
 log = logging.getLogger(__name__)
 
 OWNER_TAG = 'quanterra'
@@ -202,8 +200,9 @@ async def prepare(
         return payload, None
     # ponytail: discovery itself needs the caller's Keycloak token, so a Quanterra connection
     # with no bearer means the OAuth session is gone (its refresh failed and upstream deleted it).
+    # The chat handler (main.py) stores str(exception) as the message error, so no FastAPI here.
     if 'Authorization' not in headers:
-        raise HTTPException(status_code=401, detail=SIGN_IN_AGAIN)
+        raise PermissionError(SIGN_IN_AGAIN)
     stateless = stateless_payload(payload)
     message = last_user_message(payload.get('input'))
     chat_id = str((metadata or {}).get('chat_id') or '')

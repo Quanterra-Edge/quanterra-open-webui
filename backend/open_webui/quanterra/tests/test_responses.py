@@ -4,7 +4,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 from open_webui.quanterra import responses
 from open_webui.quanterra.responses import (
     continuity_payload,
@@ -252,9 +251,10 @@ def test_hook_asks_the_user_to_sign_in_again_when_the_oauth_session_is_gone(monk
     store = FakeStore(meta={})
     store.install(monkeypatch)
     no_bearer = {'x-quenterra-thread-id': 'chat-1'}
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(PermissionError) as caught:
         asyncio.run(prepare(SECOND_TURN, QUANTERRA, {'chat_id': 'chat-1'}, USER, no_bearer, URL))
-    assert caught.value.status_code == 401 and caught.value.detail == responses.SIGN_IN_AGAIN
+    # main.py shows str(exception) as the chat message's error
+    assert str(caught.value) == responses.SIGN_IN_AGAIN
     assert store.meta_calls == [] and store.create_calls == []
 
     # other providers without a bearer are not Quanterra's business
