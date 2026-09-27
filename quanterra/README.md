@@ -64,6 +64,40 @@ The Quanterra control plane deploys this image through its "Deploy Frontend" wiz
 The compose template the wizard uses lives in the control-plane repository under
 `deploy/templates/open-webui/docker-compose.yml`.
 
+## Conversation continuity on Quanterra connections
+
+Upstream replays the whole chat on every Responses call, tool items included
+(`routers/openai.py` `convert_to_responses_payload`). The hosted runtime's official
+parser accepts `message` items only, so a chat whose history holds one server-side
+tool round (skills, harness, MCP, `http_request`) would answer 400 on every later
+turn. `backend/open_webui/quanterra/responses.py` (hooked from `routers/openai.py`,
+guard in `utils/middleware.py`) changes what a connection tagged `quanterra` receives;
+every other provider is untouched.
+
+Per call:
+
+| Call                                                          | Body sent to `POST <base_url>/responses`                                                                                                                                                                                  |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat turn (no `metadata.task`, turn ends with a user message) | `input` = the new user message only (text, images, files as the converter builds them), `conversation_id`, `model`, `stream`, `instructions` when a system prompt is set. No `tools`, no `tool_choice`, no history items. |
+| Task call (title, tags, follow-ups, memory, query generation) | Stateless: the converter's messages as plain `message` items, no `conversation_id`; `function_call`, `function_call_output` and `reasoning` items are stripped.                                                           |
+| Continue, or a turn the conversation cannot take              | Stateless, same shape as a task call (history as messages, tool items stripped).                                                                                                                                          |
+
+Conversations: one per (chat, model). The first chat turn does
+`POST <base_url>/responses/conversations` with the same headers as the chat call
+(Bearer from the `system_oauth` session, `x-quenterra-thread-id` = chat id) and
+stores the id in the chat's `meta` as `meta.quanterra.conversations[<model id>]`,
+so it survives restarts. When the runtime answers 409/410 for a stored id
+(unknown, expired, active writer), a new conversation is created once and the
+turn re-sent; when creation fails the turn goes out stateless so the chat still
+works. Open WebUI's own tool loop does not run for these models: the runtime
+returns matched `function_call`/`function_call_output` pairs, and a dangling
+call is never executed client-side.
+
+Limitations: the runtime conversation is linear. Regenerating or editing an
+earlier message re-sends that message on the conversation, which continues from
+the latest turn; the runtime does not rewind. Temporary chats and channels have
+no saved meta and stay stateless.
+
 ## Roadmap
 
 1. Foundation (this layout, CI, guard) — done.

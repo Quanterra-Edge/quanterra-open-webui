@@ -53,6 +53,7 @@ from open_webui.models.models import Models
 from open_webui.models.notes import Notes
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.users import UserModel, Users
+from open_webui.quanterra.responses import is_quanterra_connection as quanterra_is_runtime
 from open_webui.retrieval.utils import filter_source_metadata, get_sources_from_items
 from open_webui.routers.images import (
     CreateImageForm,
@@ -5791,7 +5792,8 @@ async def streaming_chat_response_handler(response, ctx):
                         tool_calls.append(_split_tool_calls(response_tool_calls))
 
                     # Responses API path: extract function_call items from output
-                    if not response_tool_calls and output:
+                    # (Quanterra runtimes run their tools server-side; a dangling call is not ours to execute).
+                    if not response_tool_calls and output and not quanterra_is_runtime(model):
                         # Collect call_ids that already have results,
                         # including those from prior_output so we don't
                         # re-process tool calls from a previous turn.
