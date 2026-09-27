@@ -7,13 +7,13 @@ the chat screen itself.
 
 ## Where Quanterra code lives
 
-| Path | Purpose |
-| --- | --- |
-| `backend/open_webui/quanterra/` | Backend package: routes under `/api/v1/quanterra`, runtime discovery, Responses helpers |
-| `src/lib/components/quanterra/` | Svelte components for the Quanterra panels |
-| `quanterra/` | This documentation and `touch-points.txt` |
-| `scripts/quanterra/` | Guard and maintenance scripts |
-| `.github/workflows/quanterra-image.yml` | Our CI: guard, build, publish, smoke |
+| Path                                    | Purpose                                                                                 |
+| --------------------------------------- | --------------------------------------------------------------------------------------- |
+| `backend/open_webui/quanterra/`         | Backend package: routes under `/api/v1/quanterra`, runtime discovery, Responses helpers |
+| `src/lib/components/quanterra/`         | Svelte components for the Quanterra panels                                              |
+| `quanterra/`                            | This documentation and `touch-points.txt`                                               |
+| `scripts/quanterra/`                    | Guard and maintenance scripts                                                           |
+| `.github/workflows/quanterra-image.yml` | Our CI: guard, build, publish, smoke                                                    |
 
 Everything else is upstream. The few upstream files that carry a Quanterra change
 are listed in `quanterra/touch-points.txt`; `scripts/quanterra/check_touch_points.py`

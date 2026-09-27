@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="$(python -c "import re,pathlib;print(re.search(r\"UPSTREAM_TAG = '([^']+)'\", pathlib.Path('backend/open_webui/quanterra/version.py').read_text()).group(1))")"
-          git fetch --no-tags https://github.com/open-webui/open-webui.git "tag $tag"
+          git fetch --no-tags https://github.com/open-webui/open-webui.git tag "$tag"
 
       - name: Every change is Quanterra-owned or a listed touch point
         run: python scripts/quanterra/check_touch_points.py
