@@ -43,12 +43,13 @@ jobs:
       - name: Every change is Quanterra-owned or a listed touch point
         run: python scripts/quanterra/check_touch_points.py
 
-      - name: Quanterra Python compiles and is formatted
+      - name: Quanterra Python compiles, is formatted and passes its tests
         run: |
           python -m compileall -q backend/open_webui/quanterra scripts/quanterra
-          pip install "ruff>=0.15.5"
+          pip install "ruff>=0.15.5" pytest typer uvicorn
           ruff format --check backend/open_webui/quanterra scripts/quanterra
           ruff check --select=F backend/open_webui/quanterra scripts/quanterra
+          PYTHONPATH=backend pytest -q backend/open_webui/quanterra/tests
 
   publish:
     name: Build, publish and smoke-test
