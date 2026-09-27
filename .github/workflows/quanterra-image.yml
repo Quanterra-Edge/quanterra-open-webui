@@ -1,0 +1,126 @@
+name: Quanterra image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quanterra-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+  OPENWEBUI_IMAGE_NAME: ${{ vars.OPENWEBUI_IMAGE_NAME }}
+
+jobs:
+  guard:
+    name: Quanterra layout guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Fetch the upstream base tag
+        run: |
+          set -euo pipefail
+          tag="$(python -c "import re,pathlib;print(re.search(r\"UPSTREAM_TAG = '([^']+)'\", pathlib.Path('backend/open_webui/quanterra/version.py').read_text()).group(1))")"
+          git fetch --no-tags https://github.com/open-webui/open-webui.git tag "$tag"
+
+      - name: Every change is Quanterra-owned or a listed touch point
+        run: python scripts/quanterra/check_touch_points.py
+
+      - name: Quanterra Python compiles and is formatted
+        run: |
+          python -m compileall -q backend/open_webui/quanterra scripts/quanterra
+          pip install "ruff>=0.15.5"
+          ruff format --check backend/open_webui/quanterra scripts/quanterra
+          ruff check --select=F backend/open_webui/quanterra scripts/quanterra
+
+  publish:
+    name: Build, publish and smoke-test
+    needs: guard
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate registry configuration
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ACR_REGISTRY" ]] || { echo "Missing repository variable ACR_REGISTRY" >&2; exit 1; }
+          [[ -n "$OPENWEBUI_IMAGE_NAME" ]] || { echo "Missing repository variable OPENWEBUI_IMAGE_NAME" >&2; exit 1; }
+          [[ "$ACR_REGISTRY" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] || { echo "ACR_REGISTRY must be a bare registry host" >&2; exit 1; }
+          [[ -n "$ACR_USERNAME" ]] || { echo "Missing repository secret ACR_USERNAME" >&2; exit 1; }
+          [[ -n "$ACR_PASSWORD" ]] || { echo "Missing repository secret ACR_PASSWORD" >&2; exit 1; }
+
+      - name: Log in to the deployment registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Derive branch and revision tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ACR_REGISTRY }}/${{ env.OPENWEBUI_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=long,prefix=sha-
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and publish the standard image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BUILD_HASH=${{ github.sha }}
+            USE_SLIM=false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Smoke-test the published digest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="$ACR_REGISTRY/$OPENWEBUI_IMAGE_NAME@$IMAGE_DIGEST"
+          docker pull "$image"
+          docker run --rm --entrypoint python "$image" -c 'from open_webui.quanterra.version import FORK, UPSTREAM_TAG; print(FORK, UPSTREAM_TAG)'
+          docker image inspect "$image" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            | grep -Fx "$GITHUB_SHA"

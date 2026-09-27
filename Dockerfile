@@ -31,7 +31,9 @@ ARG UID
 ARG GID
 
 # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
-# ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Quanterra: the front-end build needs more than Node's default heap (upstream's own
+# frontend CI sets the same 8 GB); without it `npm run build` aborts with exit 134.
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 
 WORKDIR /app
 
