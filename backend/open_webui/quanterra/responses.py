@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from fastapi import HTTPException
+
 log = logging.getLogger(__name__)
 
 OWNER_TAG = 'quanterra'
@@ -31,6 +33,10 @@ UNKNOWN_CONVERSATION = 'unknown'
 CREATE_TIMEOUT_SECONDS = 10
 # The runtime keeps the history; these never ride along on a Quanterra body.
 DROPPED_KEYS = ('tools', 'tool_choice', 'conversation_id', 'previous_response_id')
+# Shown in the chat instead of the runtime's bare 401 "missing bearer token".
+SIGN_IN_AGAIN = (
+    'Your Quanterra sign-in has expired. Sign out of Open WebUI and sign in again to keep chatting with this agent.'
+)
 
 
 # ------------------------------------------------------------------ pure parts
@@ -194,6 +200,10 @@ async def prepare(
     """
     if not is_quanterra_connection(api_config) or (api_config or {}).get('api_type') != 'responses':
         return payload, None
+    # ponytail: discovery itself needs the caller's Keycloak token, so a Quanterra connection
+    # with no bearer means the OAuth session is gone (its refresh failed and upstream deleted it).
+    if 'Authorization' not in headers:
+        raise HTTPException(status_code=401, detail=SIGN_IN_AGAIN)
     stateless = stateless_payload(payload)
     message = last_user_message(payload.get('input'))
     chat_id = str((metadata or {}).get('chat_id') or '')
