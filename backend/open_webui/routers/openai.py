@@ -39,6 +39,7 @@ from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel
+from open_webui.quanterra import responses as quanterra_responses
 from open_webui.utils.access_control import check_model_access, has_connection_access, has_permission
 from open_webui.utils.anthropic import ANTHROPIC_VERSION, get_anthropic_models, is_anthropic_url
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -1634,6 +1635,10 @@ async def generate_chat_completion(
             request_url = f'{url}/responses'
         else:
             request_url = f'{url}/chat/completions'
+    # Quanterra: hosted runtimes keep the chat history in a server-side conversation (quanterra/responses.py).
+    payload, quanterra_fallback = await quanterra_responses.prepare(
+        payload, api_config, metadata, user.id, headers, request_url
+    )
     requested_model = payload.get('model')
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
@@ -1666,6 +1671,20 @@ async def generate_chat_completion(
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=is_streaming_request),
         )
+        # Quanterra: on a conversation conflict the turn is re-sent once (quanterra/responses.py retry).
+        if quanterra_body := await quanterra_responses.retry(
+            r, quanterra_fallback, metadata, user.id, headers, request_url
+        ):
+            payload = JSONCodec.dumps(quanterra_body)
+            r = await session.request(
+                method='POST',
+                url=request_url,
+                data=payload,
+                headers=headers,
+                cookies=cookies,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                timeout=get_client_timeout(stream=is_streaming_request),
+            )
 
         # Check if response is SSE
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
