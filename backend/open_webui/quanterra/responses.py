@@ -6,12 +6,13 @@ Upstream Open WebUI replays the whole chat on every turn, including the
 runtime's official parser accepts ``message`` items only, so a chat whose history
 holds one server-side tool round fails with 400 on every later turn.
 
-For a Quanterra connection (connection tags carry ``quanterra``) the main chat
-turn therefore sends only the new user message plus a ``conversation_id`` that
-the runtime keeps the history under, one conversation per (chat, model), stored
-in the chat's ``meta``. Background task calls (title, tags, follow-ups, ...)
-stay stateless: their messages go as plain ``message`` items. Every other
-provider is left untouched.
+For a Quanterra connection (connection tags carry ``quanterra``) the chat turn
+therefore rides a runtime ``conversation_id``, one per (chat, model), stored in
+the chat's ``meta``. The first turn on a conversation seeds it with the chat's
+history as plain ``message`` items; every later turn sends only the new user
+message. Background task calls (title, tags, follow-ups, ...) stay stateless:
+their messages go as plain ``message`` items. Every other provider is left
+untouched.
 """
 
 from __future__ import annotations
@@ -23,7 +24,10 @@ log = logging.getLogger(__name__)
 
 OWNER_TAG = 'quanterra'
 META_KEY = 'quanterra'
-STALE_CONVERSATION_STATUSES = (409, 410)
+CONFLICT_STATUSES = (409, 410)
+# The runtime answers 409 "unknown continuation id for this caller" for a conversation it does not
+# know; its other 409s (active writer, idempotency replay) are transient and keep the conversation.
+UNKNOWN_CONVERSATION = 'unknown'
 CREATE_TIMEOUT_SECONDS = 10
 # The runtime keeps the history; these never ride along on a Quanterra body.
 DROPPED_KEYS = ('tools', 'tool_choice', 'conversation_id', 'previous_response_id')
@@ -36,6 +40,12 @@ def is_quanterra_connection(config: dict[str, Any] | None) -> bool:
     """True for a connection config, or a model dict carrying its tags, tagged ``quanterra``."""
     tags = (config or {}).get('tags') or []
     return any((tag.get('name') if isinstance(tag, dict) else tag) == OWNER_TAG for tag in tags)
+
+
+def is_quanterra_model(model: dict[str, Any] | None, models: dict[str, Any] | None) -> bool:
+    """A model served by a Quanterra connection: tagged itself, or a workspace preset whose base model is."""
+    base_id = ((model or {}).get('info') or {}).get('base_model_id') or ''
+    return is_quanterra_connection(model) or is_quanterra_connection((models or {}).get(base_id))
 
 
 def is_task_call(metadata: dict[str, Any] | None) -> bool:
@@ -75,6 +85,11 @@ def continuity_payload(payload: dict[str, Any], message: dict[str, Any], convers
     return body
 
 
+def seeded_payload(stateless: dict[str, Any], conversation_id: str) -> dict[str, Any]:
+    """A fresh conversation starts empty: the whole history as messages rides on its first turn."""
+    return {**stateless, 'conversation_id': conversation_id}
+
+
 def conversation_for(model_id: str, meta: dict[str, Any] | None) -> str | None:
     conversations = ((meta or {}).get(META_KEY) or {}).get('conversations') or {}
     value = conversations.get(model_id)
@@ -90,19 +105,9 @@ def remember_conversation(meta: dict[str, Any] | None, model_id: str, conversati
     return meta
 
 
-def retry_body(status: int, fallback: dict[str, Any] | None, conversation_id: str | None) -> dict[str, Any] | None:
-    """What to re-send after the chat call answered ``status``.
-
-    None: nothing to retry (not a Quanterra chat turn, or the status is not a stale
-    conversation). With a fresh ``conversation_id`` the turn goes on that
-    conversation; without one the stateless ``fallback`` keeps the chat working.
-    """
-    if fallback is None or status not in STALE_CONVERSATION_STATUSES:
-        return None
-    message = last_user_message(fallback.get('input'))
-    if conversation_id and message:
-        return continuity_payload(fallback, message, conversation_id)
-    return fallback
+def conversation_gone(status: int, error: str) -> bool:
+    """410, or the runtime's 409 for a conversation it does not know; every other 409 is transient."""
+    return status == 410 or (status == 409 and UNKNOWN_CONVERSATION in (error or ''))
 
 
 # ----------------------------------------------------------------- async parts
@@ -135,18 +140,22 @@ async def create_conversation(url: str, headers: dict[str, str]) -> str | None:
     return conversation_id if isinstance(conversation_id, str) and conversation_id else None
 
 
-async def load_meta(chat_id: str) -> dict[str, Any] | None:
-    """The chat's meta, or None when the chat is not saved (temporary chat, channel, unknown id)."""
-    from open_webui.models.chats import Chats
+async def load_meta(chat_id: str, user_id: str) -> dict[str, Any] | None:
+    """The chat's meta when the chat is saved and the caller's; None otherwise (temporary chat, channel, other user)."""
+    from sqlalchemy import select
+
+    from open_webui.internal.db import get_async_db_context
+    from open_webui.models.chats import Chat
     from open_webui.utils.chat_id import is_saved_chat_id
 
     if not is_saved_chat_id(chat_id):
         return None
-    chat = await Chats.get_chat_by_id(chat_id)
-    return dict(chat.meta or {}) if chat else None
+    async with get_async_db_context() as session:
+        row = (await session.execute(select(Chat.meta).filter_by(id=chat_id, user_id=user_id))).one_or_none()
+    return dict(row[0] or {}) if row else None
 
 
-async def save_meta(chat_id: str, meta: dict[str, Any]) -> None:
+async def save_meta(chat_id: str, user_id: str, meta: dict[str, Any]) -> None:
     # ponytail: read-modify-write of the meta JSON like update_chat_tags_by_id; a tags write racing this one
     # can drop the other's key, which only costs a fresh conversation (or a tag) next turn.
     from sqlalchemy import update
@@ -155,18 +164,17 @@ async def save_meta(chat_id: str, meta: dict[str, Any]) -> None:
     from open_webui.models.chats import Chat
 
     async with get_async_db_context() as session:
-        await session.execute(update(Chat).filter_by(id=chat_id).values(meta=meta))
+        await session.execute(update(Chat).filter_by(id=chat_id, user_id=user_id).values(meta=meta))
         await session.commit()
 
 
-async def start_conversation(chat_id: str, model_id: str, url: str, headers: dict[str, str]) -> str | None:
+async def start_conversation(
+    chat_id: str, user_id: str, model_id: str, meta: dict[str, Any], url: str, headers: dict[str, str]
+) -> str | None:
     """Create a runtime conversation for (chat, model) and record it in the chat meta."""
-    meta = await load_meta(chat_id)
-    if meta is None:
-        return None
     conversation_id = await create_conversation(url, headers)
     if conversation_id:
-        await save_meta(chat_id, remember_conversation(meta, model_id, conversation_id))
+        await save_meta(chat_id, user_id, remember_conversation(meta, model_id, conversation_id))
     return conversation_id
 
 
@@ -174,42 +182,59 @@ async def prepare(
     payload: dict[str, Any],
     api_config: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
+    user_id: str,
     headers: dict[str, str],
     url: str,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Shape the converted Responses body for a Quanterra connection.
 
     Returns ``(body, fallback)``. ``fallback`` is the stateless body to re-send when
-    the runtime reports the stored conversation stale; it is None for task calls,
+    the runtime reports a conflict on the conversation; it is None for task calls,
     for turns that cannot ride a conversation and for every other provider.
     """
-    if not is_quanterra_connection(api_config):
+    if not is_quanterra_connection(api_config) or (api_config or {}).get('api_type') != 'responses':
         return payload, None
     stateless = stateless_payload(payload)
     message = last_user_message(payload.get('input'))
-    chat_id = (metadata or {}).get('chat_id')
+    chat_id = str((metadata or {}).get('chat_id') or '')
     if is_task_call(metadata) or message is None or not chat_id:
         return stateless, None
+    meta = await load_meta(chat_id, user_id)
+    if meta is None:
+        return stateless, None
     model_id = str(payload.get('model') or '')
-    conversation_id = conversation_for(model_id, await load_meta(chat_id)) or await start_conversation(
-        chat_id, model_id, url, headers
-    )
+    if conversation_id := conversation_for(model_id, meta):
+        return continuity_payload(payload, message, conversation_id), stateless
+    conversation_id = await start_conversation(chat_id, user_id, model_id, meta, url, headers)
     if not conversation_id:
         return stateless, None
-    return continuity_payload(payload, message, conversation_id), stateless
+    return seeded_payload(stateless, conversation_id), stateless
 
 
 async def retry(
     response: Any,
     fallback: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
+    user_id: str,
     headers: dict[str, str],
     url: str,
 ) -> dict[str, Any] | None:
-    """After the chat call: a stale conversation (409/410) is replaced once; the body to re-send, or None."""
-    if fallback is None or response.status not in STALE_CONVERSATION_STATUSES:
+    """After the chat call answered a conflict: the body to re-send, or None.
+
+    A transient 409 (active writer, idempotency replay) re-sends the history
+    stateless and keeps the stored conversation. A conversation the runtime does
+    not know (409 unknown, 410) is replaced once and the history re-sent on the
+    new one; when creation fails the stateless history goes out instead.
+    """
+    if fallback is None or response.status not in CONFLICT_STATUSES:
         return None
+    error = await response.text()
     response.release()
+    if not conversation_gone(response.status, error):
+        return fallback
     chat_id = str((metadata or {}).get('chat_id') or '')
-    conversation_id = await start_conversation(chat_id, str(fallback.get('model') or ''), url, headers)
-    return retry_body(response.status, fallback, conversation_id)
+    meta = await load_meta(chat_id, user_id)
+    if meta is None:
+        return fallback
+    conversation_id = await start_conversation(chat_id, user_id, str(fallback.get('model') or ''), meta, url, headers)
+    return seeded_payload(fallback, conversation_id) if conversation_id else fallback

@@ -1636,7 +1636,9 @@ async def generate_chat_completion(
         else:
             request_url = f'{url}/chat/completions'
     # Quanterra: hosted runtimes keep the chat history in a server-side conversation (quanterra/responses.py).
-    payload, quanterra_fallback = await quanterra_responses.prepare(payload, api_config, metadata, headers, request_url)
+    payload, quanterra_fallback = await quanterra_responses.prepare(
+        payload, api_config, metadata, user.id, headers, request_url
+    )
     requested_model = payload.get('model')
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
@@ -1669,8 +1671,10 @@ async def generate_chat_completion(
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=is_streaming_request),
         )
-        # Quanterra: a conversation the runtime no longer knows is replaced once and the turn re-sent.
-        if quanterra_body := await quanterra_responses.retry(r, quanterra_fallback, metadata, headers, request_url):
+        # Quanterra: on a conversation conflict the turn is re-sent once (quanterra/responses.py retry).
+        if quanterra_body := await quanterra_responses.retry(
+            r, quanterra_fallback, metadata, user.id, headers, request_url
+        ):
             payload = JSONCodec.dumps(quanterra_body)
             r = await session.request(
                 method='POST',
