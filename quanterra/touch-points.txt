@@ -4,3 +4,4 @@
 # src/lib/components/quanterra/, quanterra/, scripts/quanterra/ and
 # .github/workflows/ is Quanterra-owned and needs no entry.
 backend/open_webui/main.py
+Dockerfile
