@@ -213,6 +213,7 @@ from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware
+from open_webui.quanterra.discovery import sync_runtime_connections as quanterra_sync_runtimes
 from open_webui.quanterra.router import router as quanterra_router
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
 from open_webui.utils.auth import (
@@ -901,6 +902,9 @@ app.include_router(quanterra_router, prefix='/api/v1/quanterra', tags=['quanterr
 @app.get('/api/models')
 @app.get('/api/v1/models')  # Experimental: Compatibility with OpenAI API
 async def get_models(request: Request, refresh: bool = False, user=Depends(get_verified_user)):
+    # Quanterra: hosted runtimes discovered from the control plane become connections.
+    if await quanterra_sync_runtimes(request, user, force=refresh):
+        refresh = True
     all_models = await get_all_models(request, refresh=refresh, user=user)
 
     # Filter out filter pipelines
