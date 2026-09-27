@@ -1,0 +1,6 @@
+# Upstream Open WebUI files that carry a Quanterra change.
+# One path per line. Keep every entry small and re-check it when merging a new
+# upstream release. Anything under backend/open_webui/quanterra/,
+# src/lib/components/quanterra/, quanterra/, scripts/quanterra/ and
+# .github/workflows/ is Quanterra-owned and needs no entry.
+backend/open_webui/main.py

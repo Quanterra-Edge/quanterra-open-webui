@@ -213,6 +213,7 @@ from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware
+from open_webui.quanterra.router import router as quanterra_router
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
 from open_webui.utils.auth import (
     create_admin_user,
@@ -885,6 +886,9 @@ app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
     app.include_router(scim.router, prefix='/api/v1/scim/v2', tags=['scim'])
+
+# Quanterra additions (see quanterra/README.md)
+app.include_router(quanterra_router, prefix='/api/v1/quanterra', tags=['quanterra'])
 
 
 ##################################
